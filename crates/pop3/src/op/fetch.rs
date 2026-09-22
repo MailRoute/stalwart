@@ -52,14 +52,8 @@ impl<T: SessionStream> Session<T> {
                         Elapsed = op_start.elapsed()
                     );
 
-                    self.write_bytes(
-                        Response::Message::<u32> {
-                            bytes,
-                            lines: lines.unwrap_or(0),
-                        }
-                        .serialize(),
-                    )
-                    .await
+                    self.write_bytes(Response::Message::<u32> { bytes, lines }.serialize())
+                        .await
                 } else {
                     Err(trc::Pop3Event::Error
                         .into_err()

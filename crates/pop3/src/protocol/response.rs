@@ -14,7 +14,7 @@ pub enum Response<T> {
     List(Vec<T>),
     Message {
         bytes: Vec<u8>,
-        lines: u32,
+        lines: Option<u32>,
     },
     Capability {
         mechanisms: Vec<Mechanism>,
@@ -52,40 +52,66 @@ impl<T: Display> Response<T> {
                 buf
             }
             Response::Message { bytes, lines } => {
-                let mut buf = Vec::with_capacity(bytes.len() + 10);
-                buf.extend_from_slice(b"+OK ");
-                buf.extend_from_slice(bytes.len().to_string().as_bytes());
-                buf.extend_from_slice(b" octets\r\n");
-
-                let mut line_count = 0;
-                let mut last_byte = 0;
+                let lines = *lines;
+                let mut message = Vec::with_capacity(bytes.len() + 16);
+                let mut octets = 0;
+                let mut last_byte = b'\n';
+                let mut in_headers = lines.is_some();
+                let mut is_blank_line = true;
+                let mut body_lines = 0;
 
                 // Transparency procedure
                 for &byte in bytes {
                     // POP3 requires that lines end with CRLF, do this check to ensure that
                     if byte == b'\n' && last_byte != b'\r' {
-                        buf.push(b'\r');
+                        message.push(b'\r');
+                        octets += 1;
                     }
 
                     if byte == b'.' && last_byte == b'\n' {
-                        buf.push(b'.');
+                        message.push(b'.');
                     }
-                    buf.push(byte);
+                    message.push(byte);
+                    octets += 1;
                     last_byte = byte;
 
-                    if *lines > 0 && byte == b'\n' {
-                        line_count += 1;
-                        if line_count == *lines {
-                            break;
+                    // TOP counts body lines, starting after the blank line that ends the headers
+                    match byte {
+                        b'\n' => {
+                            if in_headers {
+                                in_headers = !is_blank_line;
+                            } else {
+                                body_lines += 1;
+                            }
+                            if !in_headers && lines.is_some_and(|lines| body_lines >= lines) {
+                                break;
+                            }
+                            is_blank_line = true;
+                        }
+                        b'\r' => {}
+                        _ => {
+                            is_blank_line = false;
                         }
                     }
                 }
 
                 if last_byte != b'\n' {
-                    buf.extend_from_slice(b"\r\n");
+                    message.extend_from_slice(b"\r\n");
+                    octets += 2;
                 }
 
-                buf.extend_from_slice(b".\r\n");
+                if in_headers {
+                    message.extend_from_slice(b"\r\n");
+                    octets += 2;
+                }
+
+                message.extend_from_slice(b".\r\n");
+
+                let mut buf = Vec::with_capacity(message.len() + 24);
+                buf.extend_from_slice(b"+OK ");
+                buf.extend_from_slice(octets.to_string().as_bytes());
+                buf.extend_from_slice(b" octets\r\n");
+                buf.extend_from_slice(&message);
                 buf
             }
             Response::Capability { mechanisms, stls } => {
@@ -206,15 +232,100 @@ mod tests {
             ),
             (
                 Response::Message {
-                    bytes: "Subject: test\r\n\r\n.\r\ntest.\r\n.test\r\na"
-                        .as_bytes()
-                        .to_vec(),
-                    lines: 0,
+                    bytes: b"Subject: test\r\n\r\n.\r\ntest.\r\n.test\r\na".to_vec(),
+                    lines: None,
                 },
-                "+OK 35 octets\r\nSubject: test\r\n\r\n..\r\ntest.\r\n..test\r\na\r\n.\r\n",
+                "+OK 37 octets\r\nSubject: test\r\n\r\n..\r\ntest.\r\n..test\r\na\r\n.\r\n",
+            ),
+            (
+                Response::Message {
+                    bytes: b"Subject: test\r\n\r\n.\r\ntest.\r\n.test\r\na".to_vec(),
+                    lines: Some(0),
+                },
+                "+OK 17 octets\r\nSubject: test\r\n\r\n.\r\n",
+            ),
+            (
+                Response::Message {
+                    bytes: b"Subject: test\r\n\r\n.\r\ntest.\r\n.test\r\na".to_vec(),
+                    lines: Some(2),
+                },
+                "+OK 27 octets\r\nSubject: test\r\n\r\n..\r\ntest.\r\n.\r\n",
+            ),
+            (
+                Response::Message {
+                    bytes: b"Subject: test\r\n\r\n.\r\ntest.\r\n.test\r\na".to_vec(),
+                    lines: Some(100),
+                },
+                "+OK 37 octets\r\nSubject: test\r\n\r\n..\r\ntest.\r\n..test\r\na\r\n.\r\n",
+            ),
+            (
+                Response::Message {
+                    bytes: b"Subject: test\n\nbody\n".to_vec(),
+                    lines: None,
+                },
+                "+OK 23 octets\r\nSubject: test\r\n\r\nbody\r\n.\r\n",
+            ),
+            (
+                Response::Message {
+                    bytes: b"Subject: test\n\n.leading dot\n".to_vec(),
+                    lines: Some(1),
+                },
+                "+OK 31 octets\r\nSubject: test\r\n\r\n..leading dot\r\n.\r\n",
+            ),
+            (
+                Response::Message {
+                    bytes: b".dot\r\nSubject: test\r\n".to_vec(),
+                    lines: Some(3),
+                },
+                "+OK 23 octets\r\n..dot\r\nSubject: test\r\n\r\n.\r\n",
             ),
         ] {
             assert_eq!(expected, String::from_utf8(cmd.serialize()).unwrap());
         }
+    }
+
+    // MailRoute: iOS Mail previews POP messages with TOP. Filtered mail starts with
+    // a stack of Received/ARC/DKIM headers, so counting n lines from the first byte
+    // returned no From, no Subject and no body ("No Sender / No Subject").
+    #[test]
+    fn top_returns_all_headers_before_counting_body_lines() {
+        let mut raw = String::new();
+        for hop in 0..12 {
+            raw.push_str(&format!(
+                "Received: from relay{hop}.example.net (relay{hop}.example.net [192.0.2.{hop}])\r\n\tby mx.example.com with ESMTPS; Mon, 21 Sep 2026 12:00:00 +0000\r\n"
+            ));
+        }
+        raw.push_str("From: Sender <sender@example.net>\r\nSubject: Quarterly report\r\n");
+        raw.push_str("Content-Type: text/plain; charset=utf-8\r\n\r\n");
+        raw.push_str("First body line\r\nSecond body line\r\nThird body line\r\n");
+
+        for lines in [0u32, 1, 5] {
+            let out = String::from_utf8(
+                Response::Message::<u32> {
+                    bytes: raw.clone().into_bytes(),
+                    lines: Some(lines),
+                }
+                .serialize(),
+            )
+            .unwrap();
+            assert!(out.contains("From: Sender <sender@example.net>\r\n"), "TOP {lines}: {out}");
+            assert!(out.contains("Subject: Quarterly report\r\n"), "TOP {lines}: {out}");
+            assert!(out.contains("Content-Type: text/plain"), "TOP {lines}: {out}");
+            assert_eq!(out.contains("First body line"), lines >= 1, "TOP {lines}: {out}");
+            assert!(!out.contains("Second body line") || lines >= 2, "TOP {lines}: {out}");
+            assert!(out.ends_with("\r\n.\r\n"), "TOP {lines}: {out}");
+        }
+
+        // RETR returns the whole message, and the octet count matches what is sent
+        let out = String::from_utf8(
+            Response::Message::<u32> {
+                bytes: raw.clone().into_bytes(),
+                lines: None,
+            }
+            .serialize(),
+        )
+        .unwrap();
+        assert!(out.starts_with(&format!("+OK {} octets\r\n", raw.len())));
+        assert!(out.contains("Third body line"));
     }
 }
