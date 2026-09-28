@@ -10,7 +10,8 @@ use deadpool::{
     managed::{Manager, Pool},
 };
 use redis::{
-    Client, ConnectionAddr, IntoConnectionInfo, ProtocolVersion, Script, TlsMode,
+    Client, ClientTlsConfig, ConnectionAddr, IntoConnectionInfo, ProtocolVersion, Script,
+    TlsCertificates, TlsMode,
     cluster::{ClusterClient, ClusterClientBuilder},
     cluster_read_routing::RandomReplicaStrategy,
     sentinel::{SentinelClient, SentinelClientBuilder, SentinelServerType},
@@ -67,8 +68,11 @@ impl RedisStore {
         Ok(InMemoryStore::Redis(Arc::new(RedisStore::new(
             RedisPool::Single(build_pool(
                 RedisConnectionManager {
-                    client: Client::open(config.url)
-                        .map_err(|err| format!("Failed to open Redis client: {err:?}"))?,
+                    client: match tls_certificates_from_env()? {
+                        Some(certs) => Client::build_with_tls(config.url, certs),
+                        None => Client::open(config.url),
+                    }
+                    .map_err(|err| format!("Failed to open Redis client: {err:?}"))?,
                     timeout: config.timeout.into_inner(),
                 },
                 config.pool_max_connections,
@@ -101,6 +105,9 @@ impl RedisStore {
         }
         if matches!(config.protocol_version, RedisProtocol::Resp3) {
             builder = builder.use_protocol(ProtocolVersion::RESP3);
+        }
+        if let Some(certs) = tls_certificates_from_env()? {
+            builder = builder.certs(certs);
         }
 
         let client = builder
@@ -174,6 +181,13 @@ impl RedisStore {
         if let Some(tls_mode) = tls_mode {
             builder = builder.set_client_to_redis_tls_mode(tls_mode);
         }
+        if let Some(certs) = tls_certificates_from_env()? {
+            // Applied to the Sentinel connections and to every connection to the
+            // discovered primary (pooled and pub/sub alike); needs rediss:// URLs.
+            builder = builder
+                .set_client_to_sentinel_certificates(certs.clone())
+                .set_client_to_redis_certificates(certs);
+        }
 
         let client = builder
             .build()
@@ -192,6 +206,50 @@ impl RedisStore {
             )?),
         ))))
     }
+}
+
+/// Client certificate (mutual TLS) and CA for Redis connections, from the
+/// environment. Unset = previous behaviour (no client certificate, system roots).
+///
+///   STALWART_REDIS_TLS_CERT  PEM client certificate  (with _KEY)
+///   STALWART_REDIS_TLS_KEY   PEM private key
+///   STALWART_REDIS_TLS_CA    PEM root CA to trust instead of the system store
+///
+/// Node-local files, like the FDB client's FDB_NETWORK_OPTION_TLS_* variables:
+/// each node presents its own certificate, so this does not belong in the
+/// cluster-wide (datastore) configuration.
+fn tls_certificates_from_env() -> Result<Option<TlsCertificates>, String> {
+    fn read(var: &str) -> Result<Option<Vec<u8>>, String> {
+        match std::env::var(var) {
+            Ok(path) if !path.is_empty() => std::fs::read(&path)
+                .map(Some)
+                .map_err(|err| format!("Failed to read {var}={path}: {err}")),
+            _ => Ok(None),
+        }
+    }
+    let cert = read("STALWART_REDIS_TLS_CERT")?;
+    let key = read("STALWART_REDIS_TLS_KEY")?;
+    let root_cert = read("STALWART_REDIS_TLS_CA")?;
+    let client_tls = match (cert, key) {
+        (Some(client_cert), Some(client_key)) => Some(ClientTlsConfig {
+            client_cert,
+            client_key,
+        }),
+        (None, None) => None,
+        _ => {
+            return Err(
+                "STALWART_REDIS_TLS_CERT and STALWART_REDIS_TLS_KEY must be set together"
+                    .to_string(),
+            );
+        }
+    };
+    if client_tls.is_none() && root_cert.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(TlsCertificates {
+        client_tls,
+        root_cert,
+    }))
 }
 
 fn build_pool<M: Manager>(

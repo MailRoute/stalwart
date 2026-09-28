@@ -14,6 +14,9 @@ zenoh = { version = "1.10.0", default-features = false, features = ["auth_pubkey
 rdkafka = { version = "0.39", features = ["cmake-build"], optional = true }
 redis = { version = "1.6", features = [ "tokio-comp", "tokio-rustls-comp", "tls-rustls-insecure", "tls-rustls", "cluster-async", "sentinel"], optional = true }
 
+[dev-dependencies]
+tokio = { version = "1.53", features = ["macros", "rt-multi-thread", "time"] }
+
 [features]
 nats = ["async-nats", "futures"]
 zenoh = ["dep:zenoh"]
