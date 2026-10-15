@@ -308,13 +308,10 @@ impl<'x, T: JmapObject> ResolveSetReference for CopyRequest<'x, T> {
         max_depth: usize,
         eval_strings: bool,
     ) -> trc::Result<()> {
-        // Resolve create references
-        for (id, obj) in self.create.iter_mut() {
+        // Resolve create references. The keys are creation ids chosen by the client, not
+        // references; a record created earlier in the request is copied with "id": "#ref".
+        for obj in self.create.values_mut() {
             obj.eval_object_references(response, &mut Graph::None, 0, max_depth, eval_strings)?;
-
-            if let MaybeIdReference::Reference(ir) = id {
-                *id = MaybeIdReference::Id(response.eval_id_reference(ir)?);
-            }
         }
 
         Ok(())

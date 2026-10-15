@@ -16,7 +16,7 @@ use jmap_proto::{
     },
     object::contact,
     request::{
-        Call, IntoValid, MaybeInvalid, RequestMethod, SetRequestMethod,
+        Call, MaybeInvalid, RequestMethod, SetRequestMethod,
         method::{MethodFunction, MethodName, MethodObject},
         reference::MaybeResultReference,
     },
@@ -106,7 +106,7 @@ impl JmapContactCardCopy for Server {
         // Obtain quota
         let mut batch = BatchBuilder::new();
 
-        'create: for (id, create) in request.create.into_valid() {
+        'create: for (id, create) in request.create {
             let from_contact_id = id.document_id();
             if !from_contact_ids.contains(from_contact_id) {
                 response.not_created.append(

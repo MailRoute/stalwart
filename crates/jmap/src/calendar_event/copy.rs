@@ -20,7 +20,7 @@ use jmap_proto::{
     },
     object::calendar_event,
     request::{
-        Call, IntoValid, MaybeInvalid, RequestMethod, SetRequestMethod,
+        Call, MaybeInvalid, RequestMethod, SetRequestMethod,
         method::{MethodFunction, MethodName, MethodObject},
         reference::MaybeResultReference,
     },
@@ -115,7 +115,7 @@ impl JmapCalendarEventCopy for Server {
         // Prepare batch
         let mut batch = BatchBuilder::new();
 
-        'create: for (id, create) in request.create.into_valid() {
+        'create: for (id, create) in request.create {
             let from_calendar_event_id = id.document_id();
             if !from_calendar_event_ids.contains(from_calendar_event_id) {
                 response.not_created.append(

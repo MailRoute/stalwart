@@ -24,7 +24,7 @@ use jmap_proto::{
     },
     object::file_node::{self, FileNodeProperty, OnExists},
     request::{
-        Call, IntoValid, MaybeInvalid, RequestMethod, SetRequestMethod,
+        Call, MaybeInvalid, RequestMethod, SetRequestMethod,
         method::{MethodFunction, MethodName, MethodObject},
         reference::MaybeResultReference,
     },
@@ -132,7 +132,7 @@ impl FileNodeCopy for Server {
         let mut created_folders = AHashMap::new();
         let mut destroy_ids = Vec::new();
 
-        'create: for (id, create) in request.create.into_valid() {
+        'create: for (id, create) in request.create {
             let from_document_id = id.document_id();
             if !from_node_ids.contains(from_document_id) {
                 response.not_created.append(

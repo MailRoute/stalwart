@@ -26,7 +26,7 @@ use jmap_proto::{
     },
     object::email::{Email, EmailProperty, EmailValue},
     request::{
-        Call, IntoValid, MaybeInvalid, RequestMethod, SetRequestMethod,
+        Call, MaybeInvalid, RequestMethod, SetRequestMethod,
         method::{MethodFunction, MethodName, MethodObject},
         reference::MaybeResultReference,
     },
@@ -100,7 +100,7 @@ impl JmapEmailCopy for Server {
         let mut last_change_id = None;
         train_batch.with_account_id(from_account_id);
 
-        'create: for (id, create) in request.create.into_valid() {
+        'create: for (id, create) in request.create {
             let mut from_message_id = None;
             let mut mailboxes = Vec::new();
             let mut keywords = Vec::new();

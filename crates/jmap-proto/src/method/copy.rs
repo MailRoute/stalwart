@@ -10,7 +10,6 @@ use crate::{
     request::{
         MaybeInvalid,
         deserialize::{DeserializeArguments, deserialize_request},
-        reference::MaybeIdReference,
     },
     types::state::State,
 };
@@ -25,7 +24,7 @@ pub struct CopyRequest<'x, T: JmapObject> {
     pub if_from_in_state: Option<State>,
     pub account_id: Id,
     pub if_in_state: Option<State>,
-    pub create: VecMap<MaybeIdReference<Id>, Value<'x, T::Property, T::Element>>,
+    pub create: VecMap<String, Value<'x, T::Property, T::Element>>,
     pub on_success_destroy_original: Option<bool>,
     pub destroy_from_if_in_state: Option<State>,
     pub arguments: T::CopyArguments,
@@ -47,11 +46,11 @@ pub struct CopyResponse<T: JmapObject> {
 
     #[serde(rename = "created")]
     #[serde(skip_serializing_if = "VecMap::is_empty")]
-    pub created: VecMap<Id, Value<'static, T::Property, T::Element>>,
+    pub created: VecMap<String, Value<'static, T::Property, T::Element>>,
 
     #[serde(rename = "notCreated")]
     #[serde(skip_serializing_if = "VecMap::is_empty")]
-    pub not_created: VecMap<Id, SetError<T::Property>>,
+    pub not_created: VecMap<String, SetError<T::Property>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -172,7 +171,7 @@ impl<'de, T: JmapObject> Default for CopyRequest<'de, T> {
 }
 
 impl<T: JmapObject> CopyResponse<T> {
-    pub fn created(&mut self, id: Id, document_id: impl Into<T::Id>) {
+    pub fn created(&mut self, id: String, document_id: impl Into<T::Id>) {
         let document_id = document_id.into();
         self.created.append(
             id,
@@ -181,5 +180,41 @@ impl<T: JmapObject> CopyResponse<T> {
                 Value::Element(document_id.into()),
             )])),
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::request::{CopyRequestMethod, Request, RequestMethod};
+
+    #[test]
+    fn copy_keeps_every_creation_id() {
+        // Creation ids are client-chosen strings (RFC 8620, section 5.4). Keys that are not
+        // valid server Ids ("c4", "C3", "a-b_1") must not be dropped.
+        let request = Request::parse(
+            br##"{
+                    "using":["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
+                    "methodCalls": [[ "Email/copy", {
+                            "fromAccountId": "a",
+                            "accountId": "b",
+                            "create": {
+                                "c3": { "id": "e1", "mailboxIds": { "m1": true } },
+                                "c4": { "id": "e2", "mailboxIds": { "m1": true } },
+                                "C3": { "id": "e3", "mailboxIds": { "m1": true } },
+                                "a-b_1": { "id": "e4", "mailboxIds": { "m1": true } }
+                            }
+                        }, "t0" ]]
+                    }"##,
+            100,
+            1024 * 1024,
+        )
+        .unwrap();
+
+        let RequestMethod::Copy(CopyRequestMethod::Email(copy)) = &request.method_calls[0].method
+        else {
+            panic!("expected Email/copy, got {:?}", request.method_calls[0].method);
+        };
+        let keys = copy.create.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>();
+        assert_eq!(keys, ["c3", "c4", "C3", "a-b_1"]);
     }
 }
